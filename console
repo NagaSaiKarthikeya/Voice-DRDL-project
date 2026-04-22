@@ -1,316 +1,164 @@
-(function () {
-  // ── Prevent double-injection ──────────────────────────────
-  if (window.__voiceCommander) {
-    console.warn("🎙️ Voice Commander already running. Say 'stop listening' to stop it first.");
-    return;
+(function VoiceControl() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) return alert('Speech Recognition not supported in this browser.');
+
+  const recognition = new SpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.lang = 'en-US';
+
+  let isListening = false, micIndicator = null, lastToast = null;
+
+  function showToast(msg) {
+    if (lastToast) lastToast.remove();
+    const t = document.createElement('div');
+    t.style.cssText = `position:fixed;bottom:90px;right:20px;background:rgba(0,0,0,0.75);color:#fff;padding:8px 14px;border-radius:8px;font:14px/1.4 sans-serif;z-index:10001;max-width:260px;word-break:break-word;transition:opacity 0.3s;`;
+    t.textContent = '🎙 ' + msg;
+    document.body.appendChild(t);
+    lastToast = t;
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 2500);
   }
 
-  // ── Guard: Web Speech API ─────────────────────────────────
-  if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
-    alert("❌ Your browser doesn't support the Web Speech API.\nUse Google Chrome for voice commands.");
-    return;
+  function setupMic() {
+    if (document.getElementById('mic-indicator')) return;
+    micIndicator = document.createElement('div');
+    micIndicator.id = 'mic-indicator';
+    micIndicator.style.cssText = `position:fixed;bottom:20px;right:20px;width:55px;height:55px;background:#2d1820;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,0.4);color:white;font-size:24px;z-index:10000;transition:background 0.3s;`;
+    micIndicator.textContent = '🎤';
+    document.body.appendChild(micIndicator);
+    micIndicator.onclick = toggleRecognition;
   }
 
-  // ── Create HUD overlay ───────────────────────────────────
-  const hud = document.createElement("div");
-  hud.id = "__voice_hud";
-  Object.assign(hud.style, {
-    position: "fixed",
-    bottom: "24px",
-    right: "24px",
-    zIndex: "999999",
-    background: "linear-gradient(135deg, #1a1a2e 0%, #16213e 100%)",
-    color: "#e0e0ff",
-    fontFamily: "'Segoe UI', sans-serif",
-    fontSize: "13px",
-    padding: "14px 18px",
-    borderRadius: "16px",
-    boxShadow: "0 8px 32px rgba(0,0,255,0.3), 0 0 0 1px rgba(255,255,255,0.08)",
-    minWidth: "260px",
-    maxWidth: "340px",
-    transition: "opacity 0.3s ease",
-    userSelect: "none",
-    backdropFilter: "blur(12px)",
-  });
-
-  hud.innerHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-      <div id="__voice_dot" style="width:10px;height:10px;border-radius:50%;background:#4ade80;box-shadow:0 0 8px #4ade80;flex-shrink:0;"></div>
-      <span style="font-weight:700;font-size:14px;letter-spacing:0.5px;">Voice Commander</span>
-      <button id="__voice_close" style="margin-left:auto;background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;line-height:1;padding:0;">✕</button>
-    </div>
-    <div id="__voice_status" style="color:#94a3b8;font-size:12px;margin-bottom:6px;">Initialising…</div>
-    <div id="__voice_transcript" style="background:rgba(255,255,255,0.05);border-radius:8px;padding:8px 10px;min-height:36px;color:#e2e8f0;font-size:13px;line-height:1.5;word-break:break-word;">—</div>
-    <div style="margin-top:8px;color:#475569;font-size:11px;">Say <em>"stop listening"</em> to quit</div>
-  `;
-  document.body.appendChild(hud);
-
-  const dot        = document.getElementById("__voice_dot");
-  const statusEl   = document.getElementById("__voice_status");
-  const transcriptEl = document.getElementById("__voice_transcript");
-
-  document.getElementById("__voice_close").addEventListener("click", stopAll);
-
-  function setStatus(text, color = "#94a3b8") {
-    statusEl.textContent = text;
-    statusEl.style.color = color;
+  function setMicStatus(active) {
+    isListening = active;
+    micIndicator.style.background = active ? '#4CAF50' : '#2d1820';
   }
 
-  function setTranscript(text) {
-    transcriptEl.textContent = text || "—";
-  }
-
-  function pulse(ok) {
-    dot.style.background    = ok ? "#4ade80" : "#f87171";
-    dot.style.boxShadow     = ok ? "0 0 8px #4ade80" : "0 0 8px #f87171";
-    dot.style.animation     = "none";
-    setTimeout(() => {
-      dot.style.background  = "#4ade80";
-      dot.style.boxShadow   = "0 0 8px #4ade80";
-    }, 600);
-  }
-
-  // ── Helpers ───────────────────────────────────────────────
-  function getSearchBox() {
-    return (
-      document.querySelector("textarea[name='q']") ||
-      document.querySelector("input[name='q']") ||
-      document.querySelector("input[title='Search']") ||
-      document.querySelector("[role='combobox']")
+  function findElementByText(text) {
+    text = text.toLowerCase().trim();
+    const els = document.querySelectorAll('a, button, input[type="button"], input[type="submit"], [role="button"], [role="tab"], [role="link"]');
+    return Array.from(els).find(el =>
+      (el.textContent && el.textContent.toLowerCase().includes(text)) ||
+      (el.value && el.value.toLowerCase().includes(text)) ||
+      (el.getAttribute('aria-label') || '').toLowerCase().includes(text)
     );
   }
 
-  function smoothScroll(amount) {
-    window.scrollBy({ top: amount, behavior: "smooth" });
+  function findInputField(name) {
+    name = name.toLowerCase().trim();
+    return document.querySelector(
+      `input[id*="${name}" i], input[name*="${name}" i], input[placeholder*="${name}" i],
+       textarea[id*="${name}" i], textarea[name*="${name}" i],
+       input[type="search"], input[role="searchbox"], [role="searchbox"]`
+    );
   }
 
-  function toast(msg) {
-    setTranscript("✅ " + msg);
-    console.log("🎙️ Voice Commander:", msg);
+  function typeInto(el, value) {
+    el.focus(); el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  // ── Command dispatcher ────────────────────────────────────
-  function handleCommand(raw) {
-    const cmd = raw.toLowerCase().trim();
-    setTranscript("🎤 " + raw);
+  function pressEnterOn(el) {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+    el.dispatchEvent(new KeyboardEvent('keyup',   { key: 'Enter', keyCode: 13, bubbles: true }));
+  }
 
-    // STOP
-    if (cmd.includes("stop listening") || cmd.includes("stop voice")) {
-      toast("Stopped. Goodbye!");
-      setTimeout(stopAll, 1000);
-      return;
-    }
+  function findSubmit() {
+    return document.querySelector('button[type="submit"], input[type="submit"]') || findElementByText('submit');
+  }
 
-    // SCROLL
-    if (cmd.includes("scroll down")) {
-      const amt = cmd.includes("lot") ? 800 : 400;
-      smoothScroll(amt);
-      toast("Scrolled down");
-      return;
-    }
-    if (cmd.includes("scroll up")) {
-      const amt = cmd.includes("lot") ? 800 : 400;
-      smoothScroll(-amt);
-      toast("Scrolled up");
-      return;
-    }
-    if (cmd.includes("scroll to top") || cmd.includes("go to top")) {
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      toast("Jumped to top");
-      return;
-    }
-    if (cmd.includes("scroll to bottom") || cmd.includes("go to bottom")) {
-      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-      toast("Jumped to bottom");
-      return;
-    }
+  function openGoogleSearchBar() {
+    const input = document.querySelector('textarea[name="q"]') || document.querySelector('input[name="q"]') || document.querySelector('input[type="search"]');
+    if (input) { input.focus(); input.select(); showToast('Search bar opened'); return input; }
+    showToast('Search bar not found'); return null;
+  }
 
-    // NAVIGATION
-    if (cmd === "go back" || cmd === "back") {
-      history.back();
-      toast("Going back");
-      return;
-    }
-    if (cmd === "go forward" || cmd === "forward") {
-      history.forward();
-      toast("Going forward");
-      return;
-    }
-    if (cmd === "refresh" || cmd === "reload") {
-      toast("Reloading…");
-      setTimeout(() => location.reload(), 800);
-      return;
-    }
+  function switchGoogleTab(tab) {
+    tab = tab.toLowerCase().trim();
+    const tabs = document.querySelectorAll('[role="tab"], .hdtb-mitem a, #hdtb-msb a, .T47uwc');
+    const match = Array.from(tabs).find(el => el.textContent.toLowerCase().includes(tab));
+    if (match) { match.click(); showToast('Going to ' + tab); return; }
+    const el = findElementByText(tab);
+    if (el) { el.click(); showToast('Going to ' + tab); return; }
+    const q = new URLSearchParams(location.search).get('q') || '';
+    const tbm = { image: 'isch', video: 'vid', news: 'nws', shopping: 'shop' }[tab];
+    if (tbm) { location.href = `https://www.google.com/search?q=${encodeURIComponent(q)}&tbm=${tbm}`; return; }
+    if (tab === 'map') { location.href = `https://www.google.com/maps/search/${encodeURIComponent(q)}`; return; }
+    showToast('Tab "' + tab + '" not found');
+  }
 
-    // SEARCH BOX FOCUS
-    if (cmd.includes("open search") || cmd.includes("focus search") || cmd.includes("click search")) {
-      const box = getSearchBox();
-      if (box) {
-        box.focus();
-        box.select && box.select();
-        toast("Search bar focused");
-      } else {
-        setTranscript("⚠️ Search box not found");
-      }
-      return;
-    }
+  function process(cmd) {
+    cmd = cmd.toLowerCase().trim();
+    showToast(cmd);
+    console.log('[VoiceControl]', cmd);
 
-    // SEARCH <query>
-    const searchMatch = cmd.match(/^(?:search|search for|google)\s+(.+)$/);
+    if (cmd.includes('scroll way down') || cmd.includes('scroll down a lot')) return window.scrollBy({ top: 1500, behavior: 'smooth' });
+    if (cmd.includes('scroll way up')   || cmd.includes('scroll up a lot'))   return window.scrollBy({ top: -1500, behavior: 'smooth' });
+    if (cmd.includes('scroll down'))    return window.scrollBy({ top: 500, behavior: 'smooth' });
+    if (cmd.includes('scroll up'))      return window.scrollBy({ top: -500, behavior: 'smooth' });
+    if (cmd.includes('go to top')    || cmd.includes('back to top'))           return window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (cmd.includes('go to bottom') || cmd.includes('scroll to bottom'))      return window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    if (cmd.includes('go back'))        return history.back();
+    if (cmd.includes('go forward'))     return history.forward();
+    if (cmd.includes('refresh') || cmd.includes('reload')) return location.reload();
+    if (cmd.includes('zoom in'))  { document.body.style.zoom = (parseFloat(document.body.style.zoom || 1) + 0.1).toFixed(1); return; }
+    if (cmd.includes('zoom out')) { document.body.style.zoom = (parseFloat(document.body.style.zoom || 1) - 0.1).toFixed(1); return; }
+    if (cmd.includes('reset zoom')) { document.body.style.zoom = '1'; return; }
+    if (cmd.includes('stop listening') || cmd.includes('turn off mic')) { recognition.stop(); setMicStatus(false); showToast('Voice control stopped'); return; }
+
+    const goToTab = cmd.match(/go to (images?|videos?|news|maps?|shopping|all)/);
+    if (goToTab) return switchGoogleTab(goToTab[1].replace(/s$/, ''));
+
+    if (cmd.includes('open search bar') || cmd.includes('open search') || cmd.includes('focus search')) return openGoogleSearchBar();
+
+    const searchMatch = cmd.match(/search(?:\s+for)?\s+(.+)/);
     if (searchMatch) {
-      const query = searchMatch[1].trim();
-      const box = getSearchBox();
-      if (box) {
-        box.focus();
-        // Clear + set natively so React/Angular listeners fire
-        const nativeInput = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value") ||
-                            Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value");
-        if (nativeInput && nativeInput.set) {
-          nativeInput.set.call(box, query);
-        } else {
-          box.value = query;
-        }
-        box.dispatchEvent(new Event("input", { bubbles: true }));
-        box.dispatchEvent(new Event("change", { bubbles: true }));
-        toast(`Searching for: "${query}"`);
-        setTimeout(() => {
-          box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true }));
-          box.closest("form") && box.closest("form").submit();
-        }, 600);
-      } else {
-        // fallback: redirect
-        toast(`Navigating to search: "${query}"`);
-        setTimeout(() => {
-          location.href = "https://www.google.com/search?q=" + encodeURIComponent(query);
-        }, 500);
-      }
+      const input = openGoogleSearchBar() || findInputField('search') || findInputField('q');
+      if (input) { typeInto(input, searchMatch[1]); setTimeout(() => pressEnterOn(input), 300); }
       return;
     }
 
-    // TYPE <text> (just type into search box without submitting)
-    const typeMatch = cmd.match(/^type\s+(.+)$/);
+    const typeMatch = cmd.match(/type (.+) into (.+)/);
     if (typeMatch) {
-      const text = typeMatch[1].trim();
-      const box = getSearchBox();
-      if (box) {
-        box.focus();
-        box.value = text;
-        box.dispatchEvent(new Event("input", { bubbles: true }));
-        toast(`Typed: "${text}"`);
-      } else {
-        setTranscript("⚠️ No input box found");
-      }
+      const input = findInputField(typeMatch[2]);
+      if (input) { typeInto(input, typeMatch[1]); showToast(`Typed "${typeMatch[1]}" into ${typeMatch[2]}`); }
+      else showToast('Field "' + typeMatch[2] + '" not found');
       return;
     }
 
-    // CLEAR
-    if (cmd === "clear" || cmd === "clear search") {
-      const box = getSearchBox();
-      if (box) { box.value = ""; box.focus(); toast("Cleared search box"); }
+    const clickMatch = cmd.match(/click(?:\s+on)?\s+(.+)/);
+    if (clickMatch) {
+      const el = findElementByText(clickMatch[1]);
+      if (el) { el.click(); showToast('Clicked ' + clickMatch[1]); }
+      else showToast('"' + clickMatch[1] + '" not found');
       return;
     }
 
-    // CLICK FIRST RESULT
-    if (cmd.includes("click first result") || cmd.includes("open first result")) {
-      const first = document.querySelector("#search a[href], #rso a[href]");
-      if (first) {
-        toast("Opening first result…");
-        setTimeout(() => first.click(), 400);
-      } else {
-        setTranscript("⚠️ No results found on page");
-      }
+    if (cmd.includes('submit') || cmd.includes('press enter') || cmd.includes('hit enter')) {
+      const s = findSubmit() || document.activeElement;
+      if (s) { s.click ? s.click() : pressEnterOn(s); showToast('Submitted'); }
       return;
     }
 
-    // UNKNOWN
-    pulse(false);
-    setTranscript("❓ Not recognised: "" + raw + """);
-    console.warn("🎙️ Unknown command:", raw);
+    showToast('Command not recognised');
   }
 
-  // ── Speech Recognition setup ──────────────────────────────
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const recognition = new SR();
-  recognition.continuous    = true;
-  recognition.interimResults = true;
-  recognition.lang          = "en-US";
-  recognition.maxAlternatives = 1;
-
-  let finalising = false;
-
-  recognition.onstart = () => {
-    setStatus("🎙️ Listening…", "#4ade80");
-    dot.style.animation = "none";
+  recognition.onstart  = () => setMicStatus(true);
+  recognition.onerror  = () => setMicStatus(false);
+  recognition.onend    = () => { if (isListening) recognition.start(); };
+  recognition.onresult = e => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    process(transcript);
   };
 
-  recognition.onend = () => {
-    if (window.__voiceCommander) {
-      // auto-restart so it keeps listening
-      setTimeout(() => {
-        try { recognition.start(); } catch (e) {}
-      }, 300);
-    }
-  };
-
-  recognition.onerror = (e) => {
-    if (e.error === "no-speech") return;
-    if (e.error === "not-allowed") {
-      setStatus("❌ Mic permission denied", "#f87171");
-      setTranscript("Please allow microphone access and refresh.");
-      stopAll();
-      return;
-    }
-    console.warn("Speech error:", e.error);
-    setStatus("⚠️ Error: " + e.error, "#fbbf24");
-  };
-
-  recognition.onresult = (e) => {
-    let interim = "";
-    let final   = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) final += t;
-      else interim += t;
-    }
-    if (interim) {
-      setTranscript("💬 " + interim + "…");
-    }
-    if (final.trim()) {
-      pulse(true);
-      handleCommand(final.trim());
-    }
-  };
-
-  recognition.start();
-
-  // ── Stop / cleanup ────────────────────────────────────────
-  function stopAll() {
-    window.__voiceCommander = false;
-    try { recognition.abort(); } catch (_) {}
-    dot.style.background = "#f87171";
-    dot.style.boxShadow  = "0 0 8px #f87171";
-    setStatus("🔴 Stopped", "#f87171");
-    setTimeout(() => {
-      hud.style.opacity = "0";
-      setTimeout(() => hud.remove(), 400);
-    }, 1500);
-    console.log("🎙️ Voice Commander stopped.");
+  function toggleRecognition() {
+    if (isListening) { recognition.stop(); setMicStatus(false); }
+    else recognition.start();
   }
 
-  window.__voiceCommander = true;
-
-  console.log(`
-%c🎙️ Voice Commander ACTIVE
-%cAvailable commands:
-  "scroll down / up"
-  "scroll to top / bottom"
-  "open search"
-  "search <your query>"
-  "type <text>"
-  "click first result"
-  "go back / forward"
-  "refresh"
-  "stop listening"
-`, "color:#4ade80;font-weight:bold;font-size:16px", "color:#94a3b8;font-size:13px");
-
+  setupMic();
+  toggleRecognition();
+  console.log('%c🎤 Voice Control Active', 'color:#4CAF50;font-weight:bold;');
+  console.log('%cCommands: scroll up/down · scroll way up/down · go to top/bottom · go back/forward · reload · open search bar · search for <query> · go to images/videos/news/maps/shopping · type <text> into <field> · click <label> · zoom in/out/reset · stop listening', 'color:#aaa;font-size:11px;');
 })();
